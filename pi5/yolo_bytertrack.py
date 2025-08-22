@@ -1,27 +1,23 @@
 #https://medium.com/@beam_villa/object-tracking-made-easy-with-yolov11-bytetrack-73aac16a9f4a
 #
 #!/usr/bin/env python3
-import argparse, os, sys, cv2, glob, torch
+import argparse, os, sys, cv2, torch, math, time
 from pathlib import Path
 from ultralytics import YOLO
-import time
 
-import os
-
-# Limit thread contention on Pi 5 (helps stability)
-os.environ.setdefault("OMP_NUM_THREADS", "4")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
-os.environ.setdefault("MKL_NUM_THREADS", "4")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
-try:
-    import torch
-    torch.set_num_threads(4)
-except Exception:
-    pass
-try:
-    cv2.setNumThreads(1)
-except Exception:
-    pass
+# # Limit thread contention on Pi 5 (helps stability)
+# os.environ.setdefault("OMP_NUM_THREADS", "4")
+# os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+# os.environ.setdefault("MKL_NUM_THREADS", "4")
+# os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
+# try:
+#     torch.set_num_threads(4)
+# except Exception:
+#     pass
+# try:
+#     cv2.setNumThreads(1)
+# except Exception:
+#     pass
 
 def draw_text(img, text, pos, font=cv2.FONT_HERSHEY_PLAIN,
               font_scale=1, font_thickness=1,
@@ -32,25 +28,6 @@ def draw_text(img, text, pos, font=cv2.FONT_HERSHEY_PLAIN,
     tw, th = max(tw + 16, 50), max(th + 10, 20)
     cv2.rectangle(img, (x, y), (x + tw, y + th), bg_color, -1)
     cv2.putText(img, text, (x + 8, y + th - 6), font, font_scale, text_color, font_thickness)
-
-def iter_frames_from_dir(frames_dir):
-    imgs = sorted(glob.glob(str(Path(frames_dir) / "*")))
-    for p in imgs:
-        frame = cv2.imread(p)
-        if frame is None:
-            continue
-        yield frame
-
-def iter_frames_from_video(video_path):
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        yield frame
-    cap.release()
 
 def main():
     ap = argparse.ArgumentParser("YOLO11 + ByteTrack demo")
@@ -64,14 +41,12 @@ def main():
                     help="Detection confidence (ByteTrack keeps lows in 2nd stage)")
     ap.add_argument("--imgsz", type=int, default=384,
                     help="Inference image size (short side). Lower = faster on Pi")
-    ap.add_argument("--diag", action="store_true",
-                    help="Print per-frame detection counts before/after filtering for debugging")
-    ap.add_argument("--no-sanitize", action="store_true",
-                    help="Disable pre-tracker sanitization (debug only)")
     ap.add_argument("--fps", type=int, default=30,
                     help="Output FPS (if reading frames dir)")
     ap.add_argument("--device", default=None,
                     help="Force device, e.g. 'cpu' or '0' for GPU")
+    ap.add_argument("--diag", action="store_true",
+                    help="Print per-frame detection/tracking counts and IDs (no FPS)")
     args = ap.parse_args()
 
     # Load model
@@ -80,37 +55,23 @@ def main():
     # Filter invalid detections *before* the tracker runs.
     # Ultralytics triggers the tracker at the end of postprocess via this callback hook.
     def _pretracker_sanitize(predictor):
-        # predictor.results is a list of Results for the current frame/batch
+        # Runs before tracker; drop NaN/Inf or non-positive boxes to avoid Kalman numeric failures
         res = getattr(predictor, "results", None)
         if not res:
             return
         for r in res:
             boxes = getattr(r, "boxes", None)
             data = getattr(boxes, "data", None)  # Tensor [N, >=6] with xyxy in first 4 cols
-            if data is None:
-                continue
-            # Ensure tensor
-            try:
-                import torch
-            except Exception:
-                return
             if not isinstance(data, torch.Tensor) or data.numel() == 0:
                 continue
             xyxy = data[:, :4]
             w = xyxy[:, 2] - xyxy[:, 0]
             h = xyxy[:, 3] - xyxy[:, 1]
-            finite_mask = torch.isfinite(xyxy).all(dim=1)
-            size_mask = (w > 0) & (h > 0)
-            keep = finite_mask & size_mask
-            if keep.sum() == 0:
-                # No valid dets -> keep Boxes object but empty its data so tracker sees zero detections
-                boxes.data = data[:0]
-            elif keep.sum() < keep.shape[0]:
-                boxes.data = data[keep]
+            keep = torch.isfinite(xyxy).all(dim=1) & (w > 0) & (h > 0)
+            boxes.data = data[keep] if keep.any() else data[:0]
 
     # Register sanitizer: runs just before the internal tracker update
-    if not args.no_sanitize:
-        model.add_callback('on_predict_postprocess_end', _pretracker_sanitize)
+    model.add_callback('on_predict_postprocess_end', _pretracker_sanitize)
 
     # Frame iterator / source setup
     src = Path(args.source)
@@ -137,11 +98,6 @@ def main():
     frames_written = 0
     t_start = time.time()
 
-    # Real-time FPS tracking (instant & EMA) for diag output
-    t_prev = t_start
-    ema_fps = None
-    ema_alpha = 0.2  # smoothing factor for EMA FPS
-
     # Tracking loop (Ultralytics built-in ByteTrack) using persistent streaming on a supported source string
     results_iter = model.track(
         source=source_str,
@@ -156,21 +112,6 @@ def main():
 
     for r in results_iter:
         frame = getattr(r, "orig_img", None)
-        if args.diag:
-            try:
-                raw_n = int(getattr(getattr(r, 'boxes', None), 'data', []).shape[0])
-            except Exception:
-                raw_n = 0
-
-        # Compute per-frame instantaneous and smoothed (EMA) FPS
-        t_now = time.time()
-        dt = t_now - t_prev
-        inst_fps = (1.0 / dt) if dt > 0 else 0.0
-        ema_fps = inst_fps if ema_fps is None else (ema_alpha * inst_fps + (1.0 - ema_alpha) * ema_fps)
-        t_prev = t_now
-
-        # Prepare FPS label for overlay with inst and ema FPS
-        fps_label = f"FPS {ema_fps:.2f} (inst {inst_fps:.2f})"
 
         if frame is None:
             continue
@@ -184,10 +125,7 @@ def main():
         # Handle empty results safely
         if r.boxes is None or (hasattr(r.boxes, "data") and r.boxes.data is not None and r.boxes.data.numel() == 0):
             if args.diag:
-                print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (empty) "
-                      f"(ids avail: False) | inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
-            cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0, (0, 255, 0), 2)
+                print(f"[diag] frame={frames_written + 1} dets_raw=0 -> 0 (empty) ids_avail=False", flush=True)
             writer.write(frame)
             frames_written += 1
             continue
@@ -196,10 +134,7 @@ def main():
         track_ids  = getattr(r.boxes, "id", None)
         if boxes_xywh is None:
             if args.diag:
-                print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (no xywh) "
-                      f"(ids avail: False) | inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
-            cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0, (0, 255, 0), 2)
+                print(f"[diag] frame={frames_written + 1} dets_raw=0 -> 0 (no xywh) ids_avail=False", flush=True)
             writer.write(frame)
             frames_written += 1
             continue
@@ -213,7 +148,7 @@ def main():
 
         confs = r.boxes.conf.cpu().tolist() if hasattr(r.boxes, "conf") else [None]*len(boxes)
 
-        import math
+        drawn_count = 0
         for (xc, yc, w, h), tid, conf in zip(boxes, ids, confs):
             # Guard against invalid values from tracker/detector
             if not all(map(math.isfinite, (xc, yc, w, h))):
@@ -225,14 +160,12 @@ def main():
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
             label = f"id:{tid}" if conf is None else f"id:{tid}  conf:{conf:.2f}"
             draw_text(frame, label, (x1, max(0, y1 - 22)), font_scale=1, font_thickness=2, bg_color=(255,0,0))
+            drawn_count += 1
 
         if args.diag:
-            print(f"[diag] frame={frames_written} dets_raw={raw_n} -> drawn={len(boxes)} "
-                  f"(ids avail: {track_ids is not None}) "
-                  f"| inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
+            print(f"[diag] frame={frames_written + 1} dets_raw={len(boxes)} -> drawn={drawn_count} "
+                  f"ids_avail={track_ids is not None}", flush=True)
 
-        cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0, (0, 255, 0), 2)
         frames_written += 1
         writer.write(frame)
 
@@ -248,6 +181,7 @@ def main():
     print(f"  Frames processed: {frames_written}")
     print(f"  Output video FPS (playback): {fps_out:.2f}, duration={out_dur:.2f}s")
     print(f"  Inference speed (processing FPS): {proc_fps:.2f}, wall time={wall_dur:.2f}s")
+    print(f"Average inference FPS: {proc_fps:.2f} over {frames_written} frames (wall {wall_dur:.2f}s)")
 
 if __name__ == "__main__":
     main()
