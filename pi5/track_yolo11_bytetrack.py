@@ -116,7 +116,15 @@ def main():
         confs = r.boxes.conf.cpu().tolist() if hasattr(r.boxes, "conf") else [None]*len(ids)
         boxes = boxes_xywh.cpu().tolist()
 
+        import math
         for (xc, yc, w, h), tid, conf in zip(boxes, ids, confs):
+            # Guard against invalid values from tracker/detector
+            # Some detections can yield NaN/Inf or zero/negative width/height.
+            # Without these checks, converting to int would raise errors or produce invalid rectangles.
+            if not all(map(math.isfinite, (xc, yc, w, h))):
+                continue
+            if w <= 0 or h <= 0:
+                continue
             x1 = int(xc - w/2); y1 = int(yc - h/2)
             x2 = int(xc + w/2); y2 = int(yc + h/2)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
