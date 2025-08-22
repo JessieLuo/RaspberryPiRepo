@@ -53,6 +53,40 @@ def main():
     # Load model
     model = YOLO(args.model)
 
+    # Filter invalid detections *before* the tracker runs.
+    # Ultralytics triggers the tracker at the end of postprocess via this callback hook.
+    def _pretracker_sanitize(predictor):
+        # predictor.results is a list of Results for the current frame/batch
+        res = getattr(predictor, "results", None)
+        if not res:
+            return
+        for r in res:
+            boxes = getattr(r, "boxes", None)
+            data = getattr(boxes, "data", None)  # Tensor [N, >=6] with xyxy in first 4 cols
+            if data is None:
+                continue
+            # Ensure tensor
+            try:
+                import torch
+            except Exception:
+                return
+            if not isinstance(data, torch.Tensor) or data.numel() == 0:
+                continue
+            xyxy = data[:, :4]
+            w = xyxy[:, 2] - xyxy[:, 0]
+            h = xyxy[:, 3] - xyxy[:, 1]
+            finite_mask = torch.isfinite(xyxy).all(dim=1)
+            size_mask = (w > 0) & (h > 0)
+            keep = finite_mask & size_mask
+            if keep.sum() == 0:
+                # No valid dets -> make boxes empty so tracker sees none
+                r.boxes = None
+            elif keep.sum() < keep.shape[0]:
+                boxes.data = data[keep]
+
+    # Register sanitizer: runs just before the internal tracker update
+    model.add_callback('on_predict_postprocess_end', _pretracker_sanitize)
+
     # Frame iterator
     src = Path(args.source)
     if src.is_dir():
@@ -105,22 +139,6 @@ def main():
             continue
 
         r = results[0]
-
-        # Minimal pre-filter: drop NaN/Inf or zero/negative-area detections before tracker/Kalman use
-        # This prevents non–positive-definite innovation covariance in Cholesky when bad measurements occur.
-        if r and r.boxes is not None:
-            data = getattr(r.boxes, "data", None)  # ultralytics stores per-box tensor here
-            if isinstance(data, torch.Tensor) and data.numel():
-                xyxy = data[:, :4]
-                w = xyxy[:, 2] - xyxy[:, 0]
-                h = xyxy[:, 3] - xyxy[:, 1]
-                finite_mask = torch.isfinite(xyxy).all(dim=1)
-                size_mask   = (w > 0) & (h > 0)
-                keep = finite_mask & size_mask
-                if keep.sum() == 0:
-                    r.boxes = None
-                else:
-                    r.boxes.data = data[keep]
 
         # Now retrieve sanitized boxes/ids
         boxes_xywh = getattr(r.boxes, "xywh", None)
