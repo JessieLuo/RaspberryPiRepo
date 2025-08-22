@@ -5,6 +5,23 @@ import argparse, os, sys, cv2, glob, torch
 from pathlib import Path
 from ultralytics import YOLO
 
+import os
+
+# Limit thread contention on Pi 5 (helps stability)
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
+try:
+    import torch
+    torch.set_num_threads(4)
+except Exception:
+    pass
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
+
 def draw_text(img, text, pos, font=cv2.FONT_HERSHEY_PLAIN,
               font_scale=1, font_thickness=1,
               text_color=(255,255,255), bg_color=(0,0,255)):
@@ -44,6 +61,12 @@ def main():
                     help="Ultralytics model weights (e.g., yolo11n.pt)")
     ap.add_argument("--conf", type=float, default=0.1,
                     help="Detection confidence (ByteTrack keeps lows in 2nd stage)")
+    ap.add_argument("--imgsz", type=int, default=480,
+                    help="Inference image size (short side). Lower = faster on Pi")
+    ap.add_argument("--diag", action="store_true",
+                    help="Print per-frame detection counts before/after filtering for debugging")
+    ap.add_argument("--no-sanitize", action="store_true",
+                    help="Disable pre-tracker sanitization (debug only)")
     ap.add_argument("--fps", type=int, default=30,
                     help="Output FPS (if reading frames dir)")
     ap.add_argument("--device", default=None,
@@ -85,7 +108,8 @@ def main():
                 boxes.data = data[keep]
 
     # Register sanitizer: runs just before the internal tracker update
-    model.add_callback('on_predict_postprocess_end', _pretracker_sanitize)
+    if not args.no_sanitize:
+        model.add_callback('on_predict_postprocess_end', _pretracker_sanitize)
 
     # Frame iterator / source setup
     src = Path(args.source)
@@ -117,6 +141,7 @@ def main():
         stream=True,
         persist=True,
         conf=args.conf,
+        imgsz=args.imgsz,
         tracker="bytetrack.yaml",
         device=args.device,
         verbose=False,
@@ -124,6 +149,11 @@ def main():
 
     for r in results_iter:
         frame = getattr(r, "orig_img", None)
+        if args.diag:
+            try:
+                raw_n = int(getattr(getattr(r, 'boxes', None), 'data', []).shape[0])
+            except Exception:
+                raw_n = 0
         if frame is None:
             continue
 
@@ -135,6 +165,8 @@ def main():
 
         # Handle empty results safely
         if r.boxes is None or (hasattr(r.boxes, "data") and r.boxes.data is not None and r.boxes.data.numel() == 0):
+            if args.diag:
+                print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (empty)", file=sys.stderr)
             writer.write(frame)
             frames_written += 1
             continue
@@ -142,6 +174,8 @@ def main():
         boxes_xywh = getattr(r.boxes, "xywh", None)
         track_ids  = getattr(r.boxes, "id", None)
         if boxes_xywh is None:
+            if args.diag:
+                print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (no xywh)", file=sys.stderr)
             writer.write(frame)
             frames_written += 1
             continue
@@ -170,6 +204,8 @@ def main():
 
         writer.write(frame)
         frames_written += 1
+        if args.diag:
+            print(f"[diag] frame={frames_written} dets_raw={raw_n} -> drawn={len(boxes)} (ids avail: {track_ids is not None})", file=sys.stderr)
 
     writer.release()
     try:
