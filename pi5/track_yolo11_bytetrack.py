@@ -130,7 +130,7 @@ def main():
     # Tracker configs: ultralytics/cfg/trackers/{bytetrack.yaml,botsort.yaml}
     for frame in frame_stream:
         results = model.track(
-            frame,
+            [frame],
             persist=True,
             conf=args.conf,
             tracker="bytetrack.yaml",
