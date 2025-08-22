@@ -126,25 +126,29 @@ def main():
 
     frames_written = 0
 
-    # Tracking loop (Ultralytics built-in ByteTrack)
-    # Tracker configs: ultralytics/cfg/trackers/{bytetrack.yaml,botsort.yaml}
-    for frame in frame_stream:
-        results = model.track(
-            [frame],
-            persist=True,
-            conf=args.conf,
-            tracker="bytetrack.yaml",
-            device=args.device,
-            verbose=False
-        )
+    # Tracking loop (Ultralytics built-in ByteTrack) using persistent streaming
+    # This ensures the same internal predictor/tracker instance processes every frame.
+    results_iter = model.track(
+        source=frame_stream,
+        stream=True,
+        persist=True,
+        conf=args.conf,
+        tracker="bytetrack.yaml",
+        device=args.device,
+        verbose=False,
+    )
+
+    for r in results_iter:
+        # Retrieve the original frame from Ultralytics result
+        frame = getattr(r, "orig_img", None)
+        if frame is None:
+            continue  # skip if result lacks an image (shouldn't happen)
 
         # Handle empty results safely
-        if not results or results[0] is None or results[0].boxes is None:
+        if r.boxes is None or (hasattr(r.boxes, "data") and r.boxes.data is not None and r.boxes.data.numel() == 0):
             writer.write(frame)
             frames_written += 1
             continue
-
-        r = results[0]
 
         # Now retrieve sanitized boxes/ids
         boxes_xywh = getattr(r.boxes, "xywh", None)
