@@ -44,7 +44,7 @@ def main():
                     help="Ultralytics model weights (e.g., yolo11n.pt)")
     ap.add_argument("--conf", type=float, default=0.1,
                     help="Detection confidence (ByteTrack keeps lows in 2nd stage)")
-    ap.add_argument("--fps", type=int, default=5,
+    ap.add_argument("--fps", type=int, default=30,
                     help="Output FPS (if reading frames dir)")
     ap.add_argument("--device", default=None,
                     help="Force device, e.g. 'cpu' or '0' for GPU")
@@ -139,17 +139,21 @@ def main():
             frames_written += 1
             continue
 
-        # Now retrieve sanitized boxes/ids
         boxes_xywh = getattr(r.boxes, "xywh", None)
         track_ids  = getattr(r.boxes, "id", None)
-        if boxes_xywh is None or track_ids is None:
+        if boxes_xywh is None:
             writer.write(frame)
             frames_written += 1
             continue
 
-        ids = track_ids.int().cpu().tolist()
-        confs = r.boxes.conf.cpu().tolist() if hasattr(r.boxes, "conf") else [None]*len(ids)
         boxes = boxes_xywh.cpu().tolist()
+        # Note: ByteTrack may produce detections without IDs on some frames (e.g., lost/re-init). We still render boxes.
+        if track_ids is None:
+            ids = [-1] * len(boxes)
+        else:
+            ids = track_ids.int().cpu().tolist()
+
+        confs = r.boxes.conf.cpu().tolist() if hasattr(r.boxes, "conf") else [None]*len(boxes)
 
         import math
         for (xc, yc, w, h), tid, conf in zip(boxes, ids, confs):
