@@ -137,6 +137,11 @@ def main():
     frames_written = 0
     t_start = time.time()
 
+    # Real-time FPS tracking (instant & EMA) for diag output
+    t_prev = t_start
+    ema_fps = None
+    ema_alpha = 0.2  # smoothing factor for EMA FPS
+
     # Tracking loop (Ultralytics built-in ByteTrack) using persistent streaming on a supported source string
     results_iter = model.track(
         source=source_str,
@@ -156,6 +161,14 @@ def main():
                 raw_n = int(getattr(getattr(r, 'boxes', None), 'data', []).shape[0])
             except Exception:
                 raw_n = 0
+
+        # Compute per-frame instantaneous and smoothed (EMA) FPS
+        t_now = time.time()
+        dt = t_now - t_prev
+        inst_fps = (1.0 / dt) if dt > 0 else 0.0
+        ema_fps = inst_fps if ema_fps is None else (ema_alpha * inst_fps + (1.0 - ema_alpha) * ema_fps)
+        t_prev = t_now
+
         if frame is None:
             continue
 
@@ -168,7 +181,7 @@ def main():
         # Handle empty results safely
         if r.boxes is None or (hasattr(r.boxes, "data") and r.boxes.data is not None and r.boxes.data.numel() == 0):
             if args.diag:
-                print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (empty)", file=sys.stderr)
+                print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (empty)  |  inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}", file=sys.stderr)
             writer.write(frame)
             frames_written += 1
             continue
@@ -177,7 +190,7 @@ def main():
         track_ids  = getattr(r.boxes, "id", None)
         if boxes_xywh is None:
             if args.diag:
-                print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (no xywh)", file=sys.stderr)
+                print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (no xywh)  |  inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}", file=sys.stderr)
             writer.write(frame)
             frames_written += 1
             continue
@@ -207,7 +220,7 @@ def main():
         writer.write(frame)
         frames_written += 1
         if args.diag:
-            print(f"[diag] frame={frames_written} dets_raw={raw_n} -> drawn={len(boxes)} (ids avail: {track_ids is not None})", file=sys.stderr)
+            print(f"[diag] frame={frames_written} dets_raw={raw_n} -> drawn={len(boxes)} (ids avail: {track_ids is not None})  |  inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}", file=sys.stderr)
 
     writer.release()
     wall_dur = time.time() - t_start
