@@ -5,20 +5,6 @@ import argparse, os, sys, cv2, torch, math, time
 from pathlib import Path
 from ultralytics import YOLO
 
-# # Limit thread contention on Pi 5 (helps stability)
-# os.environ.setdefault("OMP_NUM_THREADS", "4")
-# os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
-# os.environ.setdefault("MKL_NUM_THREADS", "4")
-# os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
-# try:
-#     torch.set_num_threads(4)
-# except Exception:
-#     pass
-# try:
-#     cv2.setNumThreads(1)
-# except Exception:
-#     pass
-
 def draw_text(img, text, pos, font=cv2.FONT_HERSHEY_PLAIN,
               font_scale=1, font_thickness=1,
               text_color=(255,255,255), bg_color=(0,0,255)):
@@ -52,7 +38,7 @@ def main():
     # Load model
     model = YOLO(args.model)
 
-    # Filter invalid detections *before* the tracker runs.
+    # Filter invalid detections before the tracker runs.
     # Ultralytics triggers the tracker at the end of postprocess via this callback hook.
     def _pretracker_sanitize(predictor):
         # Runs before tracker; drop NaN/Inf or non-positive boxes to avoid Kalman numeric failures
