@@ -110,16 +110,21 @@ def main():
     else:
         # video path
         tmp_cap = cv2.VideoCapture(str(src))
-        if not tmp_cap.isOpened():
-            print(f"Cannot open: {src}", file=sys.stderr)
-            sys.exit(2)
-        fps = tmp_cap.get(cv2.CAP_PROP_FPS) or 30
+        fps = tmp_cap.get(cv2.CAP_PROP_FPS)
+        # Pi/RTSP often reports 0, 1000, 90000, or other nonsense; clamp to a sane range.
+        if not fps or fps < 1 or fps > 120:
+            fps = float(args.fps) if args.fps and args.fps > 0 else 25.0
+        else:
+            fps = float(fps)
+        print(f"[info] using output FPS={fps:.2f}", file=sys.stderr)
         w  = int(tmp_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h  = int(tmp_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         tmp_cap.release()
         fourcc = cv2.VideoWriter_fourcc(*"MP4V")
         writer = cv2.VideoWriter(args.out, fourcc, fps, (w, h))
         frame_stream = iter_frames_from_video(src)
+
+    frames_written = 0
 
     # Tracking loop (Ultralytics built-in ByteTrack)
     # Tracker configs: ultralytics/cfg/trackers/{bytetrack.yaml,botsort.yaml}
@@ -136,6 +141,7 @@ def main():
         # Handle empty results safely
         if not results or results[0] is None or results[0].boxes is None:
             writer.write(frame)
+            frames_written += 1
             continue
 
         r = results[0]
@@ -146,6 +152,7 @@ def main():
 
         if boxes_xywh is None or track_ids is None:
             writer.write(frame)
+            frames_written += 1
             continue
 
         ids = track_ids.int().cpu().tolist()
@@ -168,9 +175,14 @@ def main():
             draw_text(frame, label, (x1, max(0, y1 - 22)), font_scale=1, font_thickness=2, bg_color=(255,0,0))
 
         writer.write(frame)
+        frames_written += 1
 
     writer.release()
-    print(f"Done. Wrote: {args.out}")
+    try:
+        dur = frames_written / fps if frames_written and fps else 0
+    except Exception:
+        dur = 0
+    print(f"Done. Wrote: {args.out}  frames={frames_written}  fps={fps:.2f}  ~duration={dur:.2f}s")
 
 if __name__ == "__main__":
     main()

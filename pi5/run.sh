@@ -5,4 +5,5 @@
 # run the tracking script
 python track_yolo11_bytetrack.py\
   --source ./test.avi \
+  --conf 0.25 \
   --out ./results/test_result.mp4

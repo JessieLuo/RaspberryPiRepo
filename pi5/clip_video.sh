@@ -1,0 +1,1 @@
+ffmpeg -ss 00:00:00 -i test_backup.avi -t 00:00:10 -c copy test.avi
