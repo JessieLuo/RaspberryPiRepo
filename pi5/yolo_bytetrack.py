@@ -190,7 +190,7 @@ def main():
         if r.boxes is None or (hasattr(r.boxes, "data") and r.boxes.data is not None and r.boxes.data.numel() == 0):
             if args.diag:
                 print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (empty) "
-                      f"| inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
+                      f"(ids avail: False) | inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
             writer.write(frame)
             frames_written += 1
             continue
@@ -200,7 +200,7 @@ def main():
         if boxes_xywh is None:
             if args.diag:
                 print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (no xywh) "
-                      f"| inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
+                      f"(ids avail: False) | inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
             writer.write(frame)
             frames_written += 1
             continue
