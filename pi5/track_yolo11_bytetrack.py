@@ -87,49 +87,33 @@ def main():
     # Register sanitizer: runs just before the internal tracker update
     model.add_callback('on_predict_postprocess_end', _pretracker_sanitize)
 
-    # Frame iterator
+    # Frame iterator / source setup
     src = Path(args.source)
+    writer = None
+    fps_out = None
+
     if src.is_dir():
-        frame_iter = iter_frames_from_dir(src)
-        # peek one frame to init writer
-        try:
-            first = next(frame_iter)
-        except StopIteration:
-            print("No frames found in directory.", file=sys.stderr)
-            sys.exit(2)
-        h, w = first.shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*"MP4V")
-        writer = cv2.VideoWriter(args.out, fourcc, args.fps, (w, h))
-        frames = [first]
-        def gen():
-            for f in frames:
-                yield f
-            for f in frame_iter:
-                yield f
-        frame_stream = gen()
+        # For directories, let Ultralytics stream the folder directly; set FPS from args
+        source_str = str(src)
+        fps_out = float(args.fps if args.fps and args.fps > 0 else 30.0)
     else:
-        # video path
-        tmp_cap = cv2.VideoCapture(str(src))
+        # Video file or URL (e.g., RTSP) — let Ultralytics handle the stream
+        source_str = str(src)
+        # Probe FPS to set output metadata sensibly
+        tmp_cap = cv2.VideoCapture(source_str)
         fps = tmp_cap.get(cv2.CAP_PROP_FPS)
-        # Pi/RTSP often reports 0, 1000, 90000, or other nonsense; clamp to a sane range.
         if not fps or fps < 1 or fps > 120:
-            fps = float(args.fps) if args.fps and args.fps > 0 else 25.0
+            fps_out = float(args.fps) if args.fps and args.fps > 0 else 30.0
         else:
-            fps = float(fps)
-        print(f"[info] using output FPS={fps:.2f}", file=sys.stderr)
-        w  = int(tmp_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h  = int(tmp_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps_out = float(fps)
+        print(f"[info] using output FPS={fps_out:.2f}", file=sys.stderr)
         tmp_cap.release()
-        fourcc = cv2.VideoWriter_fourcc(*"MP4V")
-        writer = cv2.VideoWriter(args.out, fourcc, fps, (w, h))
-        frame_stream = iter_frames_from_video(src)
 
     frames_written = 0
 
-    # Tracking loop (Ultralytics built-in ByteTrack) using persistent streaming
-    # This ensures the same internal predictor/tracker instance processes every frame.
+    # Tracking loop (Ultralytics built-in ByteTrack) using persistent streaming on a supported source string
     results_iter = model.track(
-        source=frame_stream,
+        source=source_str,
         stream=True,
         persist=True,
         conf=args.conf,
@@ -139,10 +123,15 @@ def main():
     )
 
     for r in results_iter:
-        # Retrieve the original frame from Ultralytics result
         frame = getattr(r, "orig_img", None)
         if frame is None:
-            continue  # skip if result lacks an image (shouldn't happen)
+            continue
+
+        # Lazy-init writer on first frame
+        if writer is None:
+            h, w = frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"MP4V")
+            writer = cv2.VideoWriter(args.out, fourcc, fps_out, (w, h))
 
         # Handle empty results safely
         if r.boxes is None or (hasattr(r.boxes, "data") and r.boxes.data is not None and r.boxes.data.numel() == 0):
@@ -153,7 +142,6 @@ def main():
         # Now retrieve sanitized boxes/ids
         boxes_xywh = getattr(r.boxes, "xywh", None)
         track_ids  = getattr(r.boxes, "id", None)
-
         if boxes_xywh is None or track_ids is None:
             writer.write(frame)
             frames_written += 1
@@ -166,8 +154,6 @@ def main():
         import math
         for (xc, yc, w, h), tid, conf in zip(boxes, ids, confs):
             # Guard against invalid values from tracker/detector
-            # Some detections can yield NaN/Inf or zero/negative width/height.
-            # Without these checks, converting to int would raise errors or produce invalid rectangles.
             if not all(map(math.isfinite, (xc, yc, w, h))):
                 continue
             if w <= 0 or h <= 0:
@@ -183,10 +169,10 @@ def main():
 
     writer.release()
     try:
-        dur = frames_written / fps if frames_written and fps else 0
+        dur = frames_written / fps_out if frames_written and fps_out else 0
     except Exception:
         dur = 0
-    print(f"Done. Wrote: {args.out}  frames={frames_written}  fps={fps:.2f}  ~duration={dur:.2f}s")
+    print(f"Done. Wrote: {args.out}  frames={frames_written}  fps={fps_out:.2f}  ~duration={dur:.2f}s")
 
 if __name__ == "__main__":
     main()
