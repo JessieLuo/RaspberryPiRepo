@@ -4,6 +4,7 @@
 import argparse, os, sys, cv2, glob, torch
 from pathlib import Path
 from ultralytics import YOLO
+import time
 
 import os
 
@@ -134,6 +135,7 @@ def main():
         tmp_cap.release()
 
     frames_written = 0
+    t_start = time.time()
 
     # Tracking loop (Ultralytics built-in ByteTrack) using persistent streaming on a supported source string
     results_iter = model.track(
@@ -208,11 +210,17 @@ def main():
             print(f"[diag] frame={frames_written} dets_raw={raw_n} -> drawn={len(boxes)} (ids avail: {track_ids is not None})", file=sys.stderr)
 
     writer.release()
+    wall_dur = time.time() - t_start
     try:
-        dur = frames_written / fps_out if frames_written and fps_out else 0
+        out_dur = frames_written / fps_out if frames_written and fps_out else 0
     except Exception:
-        dur = 0
-    print(f"Done. Wrote: {args.out}  frames={frames_written}  fps={fps_out:.2f}  ~duration={dur:.2f}s")
+        out_dur = 0
+    proc_fps = frames_written / wall_dur if wall_dur > 0 else 0
+
+    print(f"Done. Wrote: {args.out}")
+    print(f"  Frames processed: {frames_written}")
+    print(f"  Output video FPS (playback): {fps_out:.2f}, duration={out_dur:.2f}s")
+    print(f"  Inference speed (processing FPS): {proc_fps:.2f}, wall time={wall_dur:.2f}s")
 
 if __name__ == "__main__":
     main()
