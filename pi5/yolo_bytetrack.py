@@ -169,6 +169,9 @@ def main():
         ema_fps = inst_fps if ema_fps is None else (ema_alpha * inst_fps + (1.0 - ema_alpha) * ema_fps)
         t_prev = t_now
 
+        # Prepare FPS label for overlay
+        fps_label = f"FPS {ema_fps:.2f}"
+
         if frame is None:
             continue
 
@@ -182,6 +185,8 @@ def main():
         if r.boxes is None or (hasattr(r.boxes, "data") and r.boxes.data is not None and r.boxes.data.numel() == 0):
             if args.diag:
                 print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (empty)  |  inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}", file=sys.stderr)
+            cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0, (0, 255, 0), 2)
             writer.write(frame)
             frames_written += 1
             continue
@@ -191,6 +196,8 @@ def main():
         if boxes_xywh is None:
             if args.diag:
                 print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (no xywh)  |  inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}", file=sys.stderr)
+            cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0, (0, 255, 0), 2)
             writer.write(frame)
             frames_written += 1
             continue
@@ -216,6 +223,10 @@ def main():
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
             label = f"id:{tid}" if conf is None else f"id:{tid}  conf:{conf:.2f}"
             draw_text(frame, label, (x1, max(0, y1 - 22)), font_scale=1, font_thickness=2, bg_color=(255,0,0))
+
+        # Overlay FPS at top-left
+        cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0, (0, 255, 0), 2)
 
         writer.write(frame)
         frames_written += 1
