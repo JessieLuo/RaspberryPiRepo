@@ -1,7 +1,7 @@
 #https://medium.com/@beam_villa/object-tracking-made-easy-with-yolov11-bytetrack-73aac16a9f4a
 #
 #!/usr/bin/env python3
-import argparse, os, sys, cv2, glob
+import argparse, os, sys, cv2, glob, torch
 from pathlib import Path
 from ultralytics import YOLO
 
@@ -105,6 +105,24 @@ def main():
             continue
 
         r = results[0]
+
+        # Minimal pre-filter: drop NaN/Inf or zero/negative-area detections before tracker/Kalman use
+        # This prevents non–positive-definite innovation covariance in Cholesky when bad measurements occur.
+        if r and r.boxes is not None:
+            data = getattr(r.boxes, "data", None)  # ultralytics stores per-box tensor here
+            if isinstance(data, torch.Tensor) and data.numel():
+                xyxy = data[:, :4]
+                w = xyxy[:, 2] - xyxy[:, 0]
+                h = xyxy[:, 3] - xyxy[:, 1]
+                finite_mask = torch.isfinite(xyxy).all(dim=1)
+                size_mask   = (w > 0) & (h > 0)
+                keep = finite_mask & size_mask
+                if keep.sum() == 0:
+                    r.boxes = None
+                else:
+                    r.boxes.data = data[keep]
+
+        # Now retrieve sanitized boxes/ids
         boxes_xywh = getattr(r.boxes, "xywh", None)
         track_ids  = getattr(r.boxes, "id", None)
 
