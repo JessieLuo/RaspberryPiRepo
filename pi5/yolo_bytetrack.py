@@ -169,8 +169,8 @@ def main():
         ema_fps = inst_fps if ema_fps is None else (ema_alpha * inst_fps + (1.0 - ema_alpha) * ema_fps)
         t_prev = t_now
 
-        # Prepare FPS label for overlay
-        fps_label = f"FPS {ema_fps:.2f}"
+        # Prepare FPS label for overlay with inst and ema FPS
+        fps_label = f"FPS {ema_fps:.2f} (inst {inst_fps:.2f})"
 
         if frame is None:
             continue
@@ -181,16 +181,13 @@ def main():
             fourcc = cv2.VideoWriter_fourcc(*"MP4V")
             writer = cv2.VideoWriter(args.out, fourcc, fps_out, (w, h))
 
-        # Always overlay FPS label
-        if fps_label:
-            cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0, (0, 255, 0), 2)
-
         # Handle empty results safely
         if r.boxes is None or (hasattr(r.boxes, "data") and r.boxes.data is not None and r.boxes.data.numel() == 0):
             if args.diag:
                 print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (empty) "
                       f"(ids avail: False) | inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
+            cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0, (0, 255, 0), 2)
             writer.write(frame)
             frames_written += 1
             continue
@@ -201,6 +198,8 @@ def main():
             if args.diag:
                 print(f"[diag] frame={frames_written} dets_raw={raw_n} -> 0 (no xywh) "
                       f"(ids avail: False) | inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
+            cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0, (0, 255, 0), 2)
             writer.write(frame)
             frames_written += 1
             continue
@@ -227,12 +226,14 @@ def main():
             label = f"id:{tid}" if conf is None else f"id:{tid}  conf:{conf:.2f}"
             draw_text(frame, label, (x1, max(0, y1 - 22)), font_scale=1, font_thickness=2, bg_color=(255,0,0))
 
-        frames_written += 1
         if args.diag:
             print(f"[diag] frame={frames_written} dets_raw={raw_n} -> drawn={len(boxes)} "
                   f"(ids avail: {track_ids is not None}) "
                   f"| inst_fps={inst_fps:.2f} ema_fps={ema_fps:.2f}")
 
+        cv2.putText(frame, fps_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0, (0, 255, 0), 2)
+        frames_written += 1
         writer.write(frame)
 
     writer.release()
