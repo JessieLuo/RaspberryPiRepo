@@ -79,8 +79,8 @@ def main():
             size_mask = (w > 0) & (h > 0)
             keep = finite_mask & size_mask
             if keep.sum() == 0:
-                # No valid dets -> make boxes empty so tracker sees none
-                r.boxes = None
+                # No valid dets -> keep Boxes object but empty its data so tracker sees zero detections
+                boxes.data = data[:0]
             elif keep.sum() < keep.shape[0]:
                 boxes.data = data[keep]
 
