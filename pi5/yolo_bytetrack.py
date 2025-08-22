@@ -57,11 +57,11 @@ def main():
                     help="Path to frames directory OR a video file")
     ap.add_argument("--out", default="tracking_out.mp4",
                     help="Output video filename (mp4)")
-    ap.add_argument("--model", default="yolo11n.pt",
-                    help="Ultralytics model weights (e.g., yolo11n.pt)")
+    ap.add_argument("--model", default="yolov8n.pt",
+                    help="Ultralytics .pt weights. Fast on Pi: 'yolov8n.pt' (default) or 'yolov3-tiny.pt'. Use your own .pt as needed.")
     ap.add_argument("--conf", type=float, default=0.1,
                     help="Detection confidence (ByteTrack keeps lows in 2nd stage)")
-    ap.add_argument("--imgsz", type=int, default=480,
+    ap.add_argument("--imgsz", type=int, default=384,
                     help="Inference image size (short side). Lower = faster on Pi")
     ap.add_argument("--diag", action="store_true",
                     help="Print per-frame detection counts before/after filtering for debugging")
