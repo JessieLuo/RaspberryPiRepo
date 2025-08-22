@@ -211,6 +211,10 @@ class YOLOv5LiteONNX:
         self.nc = None  # will infer from outputs
         self.class_names = None  # optional; can be set from file if needed
 
+    def set_limits(self, min_box:int=0, max_det:int=0):
+        self._min_box = int(min_box)
+        self._max_det = int(max_det)
+    
     def infer(self, frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Returns:
@@ -228,29 +232,82 @@ class YOLOv5LiteONNX:
         # out: N x (5 + nc) => [cx, cy, w, h, obj, cls...]
         if self.nc is None:
             self.nc = out.shape[1] - 5
-        # confidence = obj_conf * best_class_conf
-        obj = out[:, 4]
-        cls_scores = out[:, 5:]
-        cls_ids = np.argmax(cls_scores, axis=1)
-        cls_conf = cls_scores[np.arange(out.shape[0]), cls_ids]
-        conf = obj * cls_conf
+
+        # --- Robust postprocessing for YOLOv5-Lite ONNX ---
+        # Split raw outputs
+        boxes_xywh = out[:, :4].astype(np.float32)
+        obj = out[:, 4].astype(np.float32)
+        cls_scores = out[:, 5:].astype(np.float32)
+
+        # If exporter left logits (values outside [0,1]), apply sigmoid to obj and class scores
+        def _sigmoid(x): return 1.0 / (1.0 + np.exp(-x))
+        if np.nanmax(obj) > 1.0 or np.nanmin(obj) < 0.0 or np.nanmax(cls_scores) > 1.0 or np.nanmin(cls_scores) < 0.0:
+            obj = _sigmoid(obj)
+            cls_scores = _sigmoid(cls_scores)
+
+        # Some YOLOv5-Lite exports keep boxes normalized to input; scale to network input size if so
+        # Heuristic: if all coords are in [0, 1.5], treat as normalized
+        if np.nanmax(boxes_xywh) <= 1.5:
+            boxes_xywh[:, :4] *= float(self.imgsz)
+
+        # Class/conf extraction and keep logic
+        if cls_scores.shape[1] == 0:
+            # No class dimension (unlikely); treat as single-class
+            cls_ids = np.zeros((boxes_xywh.shape[0],), dtype=np.int32)
+            cls_conf = np.ones_like(obj, dtype=np.float32)
+        else:
+            cls_ids = np.argmax(cls_scores, axis=1).astype(np.int32)
+            cls_conf = cls_scores[np.arange(cls_scores.shape[0]), cls_ids].astype(np.float32)
+
+        conf = (obj * cls_conf).astype(np.float32)
         keep = conf >= self.conf_thresh
-        out = out[keep]
+        boxes_xywh = boxes_xywh[keep]
         conf = conf[keep]
         cls_ids = cls_ids[keep]
 
-        if out.shape[0] == 0:
+        if boxes_xywh.shape[0] == 0:
             return np.zeros((0,4), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.int32)
 
-        boxes_xywh = out[:, :4]
         # Scale from network input back to frame size
         boxes_xyxy = self._scale_coords(boxes_xywh, (w, h))
+
+        # Prepare [x,y,w,h] for OpenCV NMS (expects xywh integers)
+        boxes_xywh_for_nms = np.zeros_like(boxes_xyxy, dtype=np.float32)
+        boxes_xywh_for_nms[:, 0] = boxes_xyxy[:, 0]
+        boxes_xywh_for_nms[:, 1] = boxes_xyxy[:, 1]
+        boxes_xywh_for_nms[:, 2] = np.clip(boxes_xyxy[:, 2] - boxes_xyxy[:, 0], 1.0, None)
+        boxes_xywh_for_nms[:, 3] = np.clip(boxes_xyxy[:, 3] - boxes_xyxy[:, 1], 1.0, None)
+
         # NMS (class-agnostic)
-        idxs = cv2.dnn.NMSBoxes(boxes_xyxy.tolist(), conf.tolist(), score_threshold=self.conf_thresh, nms_threshold=self.nms_thresh)
+        idxs = cv2.dnn.NMSBoxes(boxes_xywh_for_nms.tolist(), conf.tolist(),
+                        score_threshold=self.conf_thresh, nms_threshold=self.nms_thresh)
         if len(idxs) == 0:
             return np.zeros((0,4), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.int32)
         idxs = np.array(idxs, dtype=np.int32).reshape(-1)
-        return boxes_xyxy[idxs].astype(np.float32), conf[idxs].astype(np.float32), cls_ids[idxs].astype(np.int32)
+
+        boxes_xyxy = boxes_xyxy[idxs].astype(np.float32)
+        conf = conf[idxs].astype(np.float32)
+        cls_ids = cls_ids[idxs].astype(np.int32)
+
+        # size filter after NMS
+        min_box = int(getattr(self, "_min_box", 0) or 0)
+        if min_box > 0 and boxes_xyxy.shape[0] > 0:
+            w = np.clip(boxes_xyxy[:, 2] - boxes_xyxy[:, 0], 0, None)
+            h = np.clip(boxes_xyxy[:, 3] - boxes_xyxy[:, 1], 0, None)
+            keep_sz = (w >= min_box) & (h >= min_box)
+            boxes_xyxy = boxes_xyxy[keep_sz]
+            conf = conf[keep_sz]
+            cls_ids = cls_ids[keep_sz]
+
+        # cap detections per frame
+        max_det = int(getattr(self, "_max_det", 0) or 0)
+        if max_det and boxes_xyxy.shape[0] > max_det:
+            order = np.argsort(-conf)[:max_det]
+            boxes_xyxy = boxes_xyxy[order]
+            conf = conf[order]
+            cls_ids = cls_ids[order]
+
+        return boxes_xyxy, conf, cls_ids
 
     def _preprocess(self, img: np.ndarray) -> np.ndarray:
         # Letterbox to square imgsz
@@ -290,18 +347,25 @@ def main():
     ap.add_argument("--out", default="tracking_out.mp4", help="Output video filename (mp4)")
     ap.add_argument("--model", required=True, help="Path to YOLOv5-Lite ONNX weights, e.g., yolov5n-lite.onnx")
     ap.add_argument("--conf", type=float, default=0.1, help="Detection confidence low bound (ByteTrack rescues lows)")
+    ap.add_argument("--nms", type=float, default=0.45, help="NMS IoU threshold (lower = fewer overlapping boxes)")
+    ap.add_argument("--max_det", type=int, default=200, help="Cap number of detections per frame after NMS")
+    ap.add_argument("--min_box", type=int, default=12, help="Filter boxes smaller than this (pixels) after NMS")
+    ap.add_argument("--min_hits", type=int, default=2, help="Only draw tracks with at least this many updates")
+    ap.add_argument("--draw_unconfirmed", action="store_true", help="Also draw tracks that haven't been updated this frame")
     ap.add_argument("--imgsz", type=int, default=384, help="Inference image size (short side). Lower = faster")
     ap.add_argument("--fps", type=int, default=30, help="Output FPS if reading frames dir or unknown input FPS")
     ap.add_argument("--diag", action="store_true", help="Print per-frame detection/tracking counts and IDs")
     ap.add_argument("--class", dest="cls", type=int, default=None, help="Restrict to a single class id (e.g., 0 for person)")
     ap.add_argument("--iou_high", type=float, default=0.3, help="High-IOU threshold for first-stage association")
     ap.add_argument("--iou_low", type=float, default=0.2, help="Low-IOU threshold for rescue-stage association")
-    ap.add_argument("--conf_high", type=float, default=0.5, help="High confidence threshold for stage-1")
-    ap.add_argument("--conf_low", type=float, default=0.1, help="Low confidence threshold for stage-2")
+    ap.add_argument("--conf_high", type=float, default=0.3, help="High confidence threshold for stage-1")
+    ap.add_argument("--conf_low", type=float, default=0.05, help="Low confidence threshold for stage-2")
     args = ap.parse_args()
 
     # Detector + Tracker
     det = YOLOv5LiteONNX(args.model, imgsz=args.imgsz, conf_thresh=args.conf)
+    det.nms_thresh = float(args.nms)
+    det.set_limits(min_box=args.min_box, max_det=args.max_det)
     tracker = ByteTrackLite(iou_high=args.iou_high, iou_low=args.iou_low,
                             conf_high=args.conf_high, conf_low=args.conf_low, max_ttl=30)
 
@@ -365,10 +429,13 @@ def main():
         # Draw
         drawn = 0
         for t in tracks:
+            # draw only stable tracks unless explicitly requested
+            if not args.draw_unconfirmed and (t.time_since_update != 0 or t.hits < args.min_hits):
+                continue
             x1, y1, x2, y2 = t.xyxy().astype(int).tolist()
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
             draw_text(frame, f"id:{t.id} conf:{t.score:.2f}", (x1, max(0, y1 - 22)),
-                      font_scale=1, font_thickness=2, bg_color=(255,0,0))
+                    font_scale=1, font_thickness=2, bg_color=(255,0,0))
             drawn += 1
 
         if args.diag:

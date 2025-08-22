@@ -9,7 +9,7 @@ python3 yolo_bytertrack.py \
   --source ./test.avi \
   --model v5lite-e-sim.onnx \
   --imgsz 320 \
-  --conf 0.15 \
-  --fps 30 \
+  --conf 0.25 --class 0 \
+  --nms 0.35 --max_det 150 --min_box 14 --min_hits 2 \
   --out ./results/test_result.mp4 \
   --diag
