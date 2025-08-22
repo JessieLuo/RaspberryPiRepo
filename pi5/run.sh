@@ -5,8 +5,9 @@
 # run the tracking script
 python3 yolo_bytertrack.py \
   --source ./test.avi \
+  --out ./results/test_result.mp4 \
   --device cpu \
-  --model yolov8n.pt \
+  --model yolov3-tinyu.pt \
   --imgsz 384 \
   --conf 0.25 \
   --fps 30 \
